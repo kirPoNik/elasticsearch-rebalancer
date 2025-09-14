@@ -57,7 +57,7 @@ def attempt_to_find_swap(
         reversed_ordered_nodes = reversed(ordered_nodes)
         max_node = find_node(reversed_ordered_nodes, max_node_name)
         max_node_shards = node_name_to_shards[max_node['name']]
-        if max_node_shards:
+        if max_node_shards and len(max_node_shards) > 1:
             break
         else:
             if max_node_name:
