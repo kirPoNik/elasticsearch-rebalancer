@@ -4,6 +4,8 @@ from time import sleep
 import click
 import requests
 
+import sys
+
 
 from .util import (
     check_cluster_health,
@@ -51,7 +53,19 @@ def attempt_to_find_swap(
     )
 
     min_node = find_node(ordered_nodes, min_node_name)
-    max_node = find_node(reversed(ordered_nodes), max_node_name)
+    while True:
+        reversed_ordered_nodes = reversed(ordered_nodes)
+        max_node = find_node(reversed_ordered_nodes, max_node_name)
+        max_node_shards = node_name_to_shards[max_node['name']]
+        if max_node_shards:
+            break
+        else:
+            if max_node_name:
+                raise BalanceException(f'Node {max_node_name} has no shards to move!')
+            # Remove this node from the list and try again
+            ordered_nodes.remove(max_node)
+            if not ordered_nodes:
+                return None  # No more nodes to try
 
     min_weight = min_node['weight']
     max_weight = max_node['weight']
@@ -64,7 +78,6 @@ def attempt_to_find_swap(
         f'spread={format_shard_weight_function(spread_used)}'
     ))
 
-    max_node_shards = node_name_to_shards[max_node['name']]
     min_node_shards = node_name_to_shards[min_node['name']]
 
     for shard in reversed(max_node_shards):  # biggest to smallest shard
