@@ -79,19 +79,20 @@ def attempt_to_find_swap(
             'Could not find suitable large shard to move to '
             f'{min_node["name"]}!'
         ))
-
-    for shard in min_node_shards:
-        if (
-            shard['id'] not in used_shards
-            and max_node['name'] not in index_to_node_names[shard['index']]
-        ):
-            min_shard = shard
-            break
-    else:
-        raise BalanceException((
-            'Could not find suitable small shard to move to '
-            f'{max_node["name"]}!'
-        ))
+    
+    if not one_way:
+        for shard in min_node_shards:
+            if (
+                shard['id'] not in used_shards
+                and max_node['name'] not in index_to_node_names[shard['index']]
+            ):
+                min_shard = shard
+                break
+        else:
+            raise BalanceException((
+                'Could not find suitable small shard to move to '
+                f'{max_node["name"]}!'
+            ))
 
     # Update shard + node info according to the reroutes
     used_shards.add(max_shard['id'])
@@ -211,7 +212,7 @@ def print_execute_reroutes(es_host, commands):
             f'Waiting for relocation to complete ({i}/{len(commands)})...',
         )
         wait_for_no_relocations(es_host)
-        check_raise_health(es_host)  # check the cluster is still good
+        # check_raise_health(es_host)  # check the cluster is still good
         # Wait for minimum update interval or ES might still think there's not
         # enough space for the next reroute.
         sleep(cluster_update_interval + 1)
@@ -336,7 +337,7 @@ def make_rebalance_elasticsearch_cli(
                 raise click.ClickException('Cannot have --commit and --print-state!')
 
             # Check we have a healthy cluster
-            check_raise_health(es_host)
+            # check_raise_health(es_host)
 
             click.echo('Disabling cluster rebalance...')
             settings_to_set = {'cluster.routing.rebalance.enable': 'none'}
@@ -387,7 +388,9 @@ def make_rebalance_elasticsearch_cli(
             all_reroute_commands = []
             used_shards = set()
 
-            for i in range(iterations):
+            i = 0
+            while(True):
+                i+=1
                 click.echo(f'> Iteration {i}')
                 reroute_commands = attempt_to_find_swap(
                     nodes, shards,
@@ -400,7 +403,13 @@ def make_rebalance_elasticsearch_cli(
 
                 if reroute_commands:
                     all_reroute_commands.extend(reroute_commands)
-
+                    if commit:
+                        print_execute_reroutes(es_host, all_reroute_commands)
+                        all_reroute_commands = []
+                else:
+                    ## Exiting because we rebalance fully
+                    break
+                
                 click.echo()
 
                 if min_node:
@@ -408,8 +417,9 @@ def make_rebalance_elasticsearch_cli(
                 if max_node:
                     max_node.rotate()
 
-            if commit:
-                print_execute_reroutes(es_host, all_reroute_commands)
+                if iterations and i >= iterations:
+                    ## Exiting because limit of iterations
+                    break
 
         except requests.HTTPError as e:
             click.echo(click.style(e.response.content, 'yellow'))

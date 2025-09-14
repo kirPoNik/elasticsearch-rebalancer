@@ -3,6 +3,8 @@ from fnmatch import fnmatch
 from time import sleep
 
 import requests
+import urllib3
+urllib3.disable_warnings()
 
 from humanize import naturalsize
 
@@ -16,7 +18,8 @@ def matches_attrs(attrs, match_attrs):
 
 def es_request(es_host, endpoint, method=requests.get, **kwargs):
     response = method(
-        f'http://{es_host}/{endpoint}',
+        f'https://{es_host}/{endpoint}',
+        verify = False,
         **kwargs,
     )
 
@@ -98,7 +101,7 @@ def get_nodes(es_host, attrs=None):
 
 
 def get_shard_size(shard):
-    return int(shard['store'])
+    return int(shard['store']) if not shard['store'] == None else 0
 
 
 def format_shard_size(weight):
@@ -152,6 +155,7 @@ def get_shards(
         shard['weight'] = get_shard_weight_function(shard)
 
         filtered_shards.append(shard)
+
     return filtered_shards
 
 
@@ -170,21 +174,30 @@ def combine_nodes_and_shards(nodes, shards):
 
     ordered_nodes = []
     for node in nodes:
+        # Use node storage capacity as weight instead of shard weights
+        # This ensures all nodes are included in rebalancing regardless of index filtering
+        fs_total = node.get('fs', {}).get('total', {})
+        total_bytes = fs_total.get('total_in_bytes', 0)
+        available_bytes = fs_total.get('available_in_bytes', 0)
+        used_bytes = total_bytes - available_bytes
+        
+        node['weight'] = used_bytes
+        
+        # Ensure nodes without filtered shards are still included with empty shard list
         if node['name'] not in node_name_to_shards:
-            continue
-
-        node['weight'] = sum(
-            shard['weight'] for shard in node_name_to_shards[node['name']]
-        )
+            node_name_to_shards[node['name']] = []
 
         ordered_nodes.append(node)
 
     ordered_nodes = sorted(ordered_nodes, key=lambda node: node['weight'])
 
     # min_weight = ordered_nodes[0]['weight']
-    max_weight = ordered_nodes[-1]['weight']
+    max_weight = ordered_nodes[-1]['weight'] if ordered_nodes else 0
 
     for node in ordered_nodes:
-        node['weight_percentage'] = round((node['weight'] / max_weight) * 100, 2)
+        if max_weight > 0:
+            node['weight_percentage'] = round((node['weight'] / max_weight) * 100, 2)
+        else:
+            node['weight_percentage'] = 0
 
     return ordered_nodes, node_name_to_shards, index_to_node_names
