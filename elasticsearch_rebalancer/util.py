@@ -158,8 +158,7 @@ def get_shards(
 
     return filtered_shards
 
-
-def combine_nodes_and_shards(nodes, shards):
+def combine_nodes_and_shards(nodes, shards, index_name_filter = None):
     node_name_to_shards = defaultdict(list)
     index_to_node_names = defaultdict(list)
 
@@ -174,14 +173,55 @@ def combine_nodes_and_shards(nodes, shards):
 
     ordered_nodes = []
     for node in nodes:
-        # Use node storage capacity as weight instead of shard weights
-        # This ensures all nodes are included in rebalancing regardless of index filtering
+        if node['name'] not in node_name_to_shards:
+            continue
+
+        node['weight'] = sum(
+            shard['weight'] for shard in node_name_to_shards[node['name']]
+        )
+
+        ordered_nodes.append(node)
+
+    ordered_nodes = sorted(ordered_nodes, key=lambda node: node['weight'])
+
+    # min_weight = ordered_nodes[0]['weight']
+    max_weight = ordered_nodes[-1]['weight']
+
+    for node in ordered_nodes:
+        node['weight_percentage'] = round((node['weight'] / max_weight) * 100, 2)
+
+    return ordered_nodes, node_name_to_shards, index_to_node_names
+
+
+
+def combine_nodes_and_shards_new(nodes, shards):
+    node_name_to_shards = defaultdict(list)
+    index_to_node_names = defaultdict(list)
+
+    for shard in shards:
+        node_name_to_shards[shard['node']].append(shard)
+        index_to_node_names[shard['index']].append(shard['node'])
+
+    node_name_to_shards = {
+        node_name: sorted(shards, key=lambda shard: shard['weight'])
+        for node_name, shards in node_name_to_shards.items()
+    }
+
+    ordered_nodes = []
+    for node in nodes:
+        # Calculate node weight based on current shard assignments
+        # This reflects any in-memory shard moves from previous iterations
+        node_shards = node_name_to_shards.get(node['name'], [])
+        shard_weight = sum(shard['weight'] for shard in node_shards)
+        
+        # Use the larger of shard weight or disk usage to ensure nodes are properly weighted
         fs_total = node.get('fs', {}).get('total', {})
         total_bytes = fs_total.get('total_in_bytes', 0)
         available_bytes = fs_total.get('available_in_bytes', 0)
-        used_bytes = total_bytes - available_bytes
+        disk_used_bytes = total_bytes - available_bytes
         
-        node['weight'] = used_bytes
+        # Use disk usage as base weight, adjusted by shard movements
+        node['weight'] = max(shard_weight, disk_used_bytes)
         
         # Ensure nodes without filtered shards are still included with empty shard list
         if node['name'] not in node_name_to_shards:

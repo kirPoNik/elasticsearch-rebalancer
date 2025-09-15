@@ -3,6 +3,7 @@ from time import sleep
 
 import click
 import requests
+from fnmatch import fnmatch
 
 import sys
 
@@ -47,17 +48,46 @@ def attempt_to_find_swap(
     min_node_name=None,
     format_shard_weight_function=lambda weight: weight,
     one_way=False,
+    index_name_filter=None,
 ):
     ordered_nodes, node_name_to_shards, index_to_node_names = (
-        combine_nodes_and_shards(nodes, shards)
+        combine_nodes_and_shards(nodes, shards, index_name_filter=index_name_filter)
     )
 
-    min_node = find_node(ordered_nodes, min_node_name)
+    if index_name_filter:
+        while True:
+            min_node = find_node(ordered_nodes, min_node_name)
+            min_node_shards = node_name_to_shards[min_node['name']]
+            for shard in min_node_shards:
+                if fnmatch(shard['index'], index_name_filter):
+                    ordered_nodes.remove(min_node)
+                    if not ordered_nodes:
+                        return None  # No more nodes to try
+                    break
+            else:
+                break
+    else:
+        min_node = find_node(ordered_nodes, min_node_name)
+        min_node_shards = node_name_to_shards[min_node['name']]
+
+
+
+
     while True:
         reversed_ordered_nodes = reversed(ordered_nodes)
         max_node = find_node(reversed_ordered_nodes, max_node_name)
         max_node_shards = node_name_to_shards[max_node['name']]
+
         if max_node_shards and len(max_node_shards) > 1:
+            if index_name_filter:
+                for shard in max_node_shards:
+                    if fnmatch(shard['index'], index_name_filter):
+                        break
+                else:
+                    ordered_nodes.remove(max_node)
+                    if not ordered_nodes:
+                        return None  # No more nodes to try
+                    continue
             break
         else:
             if max_node_name:
@@ -66,7 +96,7 @@ def attempt_to_find_swap(
             ordered_nodes.remove(max_node)
             if not ordered_nodes:
                 return None  # No more nodes to try
-
+            
     min_weight = min_node['weight']
     max_weight = max_node['weight']
     spread_used = round(max_weight - min_weight, 2)
@@ -78,12 +108,11 @@ def attempt_to_find_swap(
         f'spread={format_shard_weight_function(spread_used)}'
     ))
 
-    min_node_shards = node_name_to_shards[min_node['name']]
-
     for shard in reversed(max_node_shards):  # biggest to smallest shard
         if (
             shard['id'] not in used_shards
             and min_node['name'] not in index_to_node_names[shard['index']]
+            and (not index_name_filter or fnmatch(shard['index'], index_name_filter))
         ):
             max_shard = shard
             break
@@ -113,6 +142,7 @@ def attempt_to_find_swap(
     min_node['weight'] += max_shard['weight']
     max_node['weight'] -= max_shard['weight']
 
+
     if not one_way:
         used_shards.add(min_shard['id'])
         min_shard['node'] = max_node['name']
@@ -127,6 +157,7 @@ def attempt_to_find_swap(
             '> Recommended move for: '
             f'{max_shard["id"]} ({format_shard_weight_function(max_shard["weight"])})'
         ))
+        ordered_nodes.remove(min_node)
     else:
         click.echo((
             '> Recommended swap for: '
@@ -135,12 +166,12 @@ def attempt_to_find_swap(
         ))
 
     click.echo((
-        f'  maxNode: {max_node["name"]} ({len(max_node_shards)} shards) '
+        f'  maxNode: {max_node["name"]} ({len(node_name_to_shards[max_node["name"]])} shards) '
         f'({format_shard_weight_function(max_weight)} '
         f'-> {format_shard_weight_function(max_node["weight"])})'
     ))
     click.echo((
-        f'  minNode: {min_node["name"]} ({len(min_node_shards)} shards) '
+        f'  minNode: {min_node["name"]} ({len(node_name_to_shards[min_node["name"]])} shards) '
         f'({format_shard_weight_function(min_weight)} '
         f'-> {format_shard_weight_function(min_node["weight"])})'
     ))
@@ -234,9 +265,10 @@ def print_execute_reroutes(es_host, commands):
 def print_node_shard_states(
     nodes, shards,
     format_shard_weight_function=format_shard_size,
+    index_name_filter=None,
 ):
     ordered_nodes, node_name_to_shards, _ = (
-        combine_nodes_and_shards(nodes, shards)
+        combine_nodes_and_shards(nodes, shards, index_name_filter=index_name_filter)
     )
 
     for node in ordered_nodes:
@@ -379,9 +411,10 @@ def make_rebalance_elasticsearch_cli(
             shards = get_shards(
                 es_host,
                 attrs=attrs,
-                index_name_filter=index_name,
+                # index_name_filter=index_name,
                 get_shard_weight_function=get_shard_weight_function,
             )
+
             if not shards:
                 raise BalanceException('No shards found!')
 
@@ -393,6 +426,7 @@ def make_rebalance_elasticsearch_cli(
                 print_node_shard_states(
                     nodes, shards,
                     format_shard_weight_function=format_shard_weight_function,
+                    index_name_filter=index_name,
                 )
                 return
 
@@ -401,9 +435,7 @@ def make_rebalance_elasticsearch_cli(
             all_reroute_commands = []
             used_shards = set()
 
-            i = 0
-            while(True):
-                i+=1
+            for i in range(iterations):
                 click.echo(f'> Iteration {i}')
                 reroute_commands = attempt_to_find_swap(
                     nodes, shards,
@@ -412,6 +444,7 @@ def make_rebalance_elasticsearch_cli(
                     min_node_name=min_node[0] if min_node else None,
                     format_shard_weight_function=format_shard_weight_function,
                     one_way=one_way,
+                    index_name_filter=index_name,
                 )
 
                 if reroute_commands:
@@ -429,10 +462,6 @@ def make_rebalance_elasticsearch_cli(
                     min_node.rotate()
                 if max_node:
                     max_node.rotate()
-
-                if iterations and i >= iterations:
-                    ## Exiting because limit of iterations
-                    break
 
         except requests.HTTPError as e:
             click.echo(click.style(e.response.content, 'yellow'))
